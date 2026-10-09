@@ -1,0 +1,834 @@
+/*
+   ADAPTIVE TIME-LOCKED WIRELESS CHARGING STATION
+   ESP32 + 4x4 Keypad + I2C LCD + Servo + Relay + LED
+
+   LED = Wireless charger simulation
+   Relay = Charger ON/OFF control
+*/
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Keypad.h>
+#include <ESP32Servo.h>
+
+// --------------------------------------------------
+// LCD
+// --------------------------------------------------
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// --------------------------------------------------
+// SERVO
+// --------------------------------------------------
+
+Servo doorServo;
+
+#define SERVO_PIN 18
+
+#define DOOR_CLOSED 0
+#define DOOR_OPEN   180
+
+// --------------------------------------------------
+// RELAY
+// --------------------------------------------------
+
+#define RELAY_PIN 19
+
+// --------------------------------------------------
+// KEYPAD
+// --------------------------------------------------
+
+const byte ROWS = 4;
+const byte COLS = 4;
+
+char keys[ROWS][COLS] =
+{
+  {'1','2','3','A'},
+  {'4','5','6','B'},
+  {'7','8','9','C'},
+  {'*','0','#','D'}
+};
+
+byte rowPins[ROWS] = {13, 14, 27, 26};
+byte colPins[COLS] = {25, 33, 32, 23};
+
+Keypad keypad = Keypad(
+  makeKeymap(keys),
+  rowPins,
+  colPins,
+  ROWS,
+  COLS
+);
+
+// --------------------------------------------------
+// SYSTEM STATES
+// --------------------------------------------------
+
+enum SystemState
+{
+  START_SCREEN,
+  CREATE_PASSWORD,
+  PHONE_PLACEMENT,
+  ENTER_TIME,
+  SELECT_UNIT,
+  WAIT_CLOSE,
+  CHARGING,
+  PASSWORD_AFTER_CHARGE,
+  EMERGENCY_PASSWORD,
+  REMOVE_PHONE,
+  RESET_SYSTEM
+};
+
+SystemState state = START_SCREEN;
+
+// --------------------------------------------------
+// PASSWORD
+// --------------------------------------------------
+
+String savedPassword = "";
+String enteredPassword = "";
+
+// --------------------------------------------------
+// TIME
+// --------------------------------------------------
+
+unsigned long selectedSeconds = 0;
+unsigned long remainingSeconds = 0;
+
+unsigned long lastTimerUpdate = 0;
+
+// --------------------------------------------------
+// INPUT
+// --------------------------------------------------
+
+String numberInput = "";
+
+// --------------------------------------------------
+// FUNCTION DECLARATIONS
+// --------------------------------------------------
+
+void showStartScreen();
+void createPassword();
+void phonePlacement();
+void enterChargingTime();
+void selectTimeUnit();
+void waitForClose();
+void startCharging();
+void chargingProcess();
+void enterPasswordAfterCharge();
+void emergencyAccess();
+void removePhone();
+void resetSystem();
+
+void openDoor();
+void closeDoor();
+void relayON();
+void relayOFF();
+
+String getPassword();
+bool checkPassword(String pass);
+
+void displayCountdown();
+void clearLCD();
+
+// --------------------------------------------------
+// SETUP
+// --------------------------------------------------
+
+void setup()
+{
+  Serial.begin(115200);
+
+  // LCD
+  lcd.init();
+  lcd.backlight();
+
+  // Servo
+  doorServo.attach(SERVO_PIN);
+  doorServo.write(DOOR_CLOSED);
+
+  // Relay
+  pinMode(RELAY_PIN, OUTPUT);
+  relayOFF();
+
+  // Start
+  showStartScreen();
+}
+
+// --------------------------------------------------
+// LOOP
+// --------------------------------------------------
+
+void loop()
+{
+  switch (state)
+  {
+    case START_SCREEN:
+      showStartScreen();
+      break;
+
+    case CREATE_PASSWORD:
+      createPassword();
+      break;
+
+    case PHONE_PLACEMENT:
+      phonePlacement();
+      break;
+
+    case ENTER_TIME:
+      enterChargingTime();
+      break;
+
+    case SELECT_UNIT:
+      selectTimeUnit();
+      break;
+
+    case WAIT_CLOSE:
+      waitForClose();
+      break;
+
+    case CHARGING:
+      chargingProcess();
+      break;
+
+    case PASSWORD_AFTER_CHARGE:
+      enterPasswordAfterCharge();
+      break;
+
+    case EMERGENCY_PASSWORD:
+      emergencyAccess();
+      break;
+
+    case REMOVE_PHONE:
+      removePhone();
+      break;
+
+    case RESET_SYSTEM:
+      resetSystem();
+      break;
+  }
+}
+
+// ==================================================
+// START SCREEN
+// ==================================================
+
+void showStartScreen()
+{
+  static bool displayed = false;
+
+  if (!displayed)
+  {
+    clearLCD();
+
+    lcd.setCursor(0, 0);
+    lcd.print("PRESS 9 TO");
+
+    lcd.setCursor(0, 1);
+    lcd.print("START");
+
+    displayed = true;
+  }
+
+  char key = keypad.getKey();
+
+  if (key == '9')
+  {
+    displayed = false;
+
+    savedPassword = "";
+    enteredPassword = "";
+
+    state = CREATE_PASSWORD;
+  }
+}
+
+// ==================================================
+// CREATE PASSWORD
+// ==================================================
+
+void createPassword()
+{
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("CREATE PASSWORD");
+
+  lcd.setCursor(0, 1);
+  lcd.print("ENTER 4 DIGITS");
+
+  delay(1000);
+
+  savedPassword = getPassword();
+
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("PASSWORD SAVED");
+
+  delay(1000);
+
+  openDoor();
+
+  state = PHONE_PLACEMENT;
+}
+
+// ==================================================
+// PHONE PLACEMENT
+// ==================================================
+
+void phonePlacement()
+{
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("PLACE YOUR PHONE");
+
+  lcd.setCursor(0, 1);
+  lcd.print("ENTER TIME");
+
+  delay(1500);
+
+  numberInput = "";
+
+  state = ENTER_TIME;
+}
+
+// ==================================================
+// ENTER TIME
+// ==================================================
+
+void enterChargingTime()
+{
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("TIME 1-100:");
+
+  lcd.setCursor(0, 1);
+  lcd.print(numberInput);
+
+  char key = keypad.getKey();
+
+  if (key >= '0' && key <= '9')
+  {
+    if (numberInput.length() < 3)
+    {
+      numberInput += key;
+
+      lcd.setCursor(0, 1);
+      lcd.print("                ");
+      lcd.setCursor(0, 1);
+      lcd.print(numberInput);
+    }
+  }
+
+  else if (key == '*')
+  {
+    numberInput = "";
+
+    lcd.setCursor(0, 1);
+    lcd.print("                ");
+  }
+
+  else if (key == '#')
+  {
+    int value = numberInput.toInt();
+
+    if (value >= 1 && value <= 100)
+    {
+      selectedSeconds = value;
+
+      numberInput = "";
+
+      state = SELECT_UNIT;
+    }
+    else
+    {
+      clearLCD();
+
+      lcd.setCursor(0, 0);
+      lcd.print("INVALID TIME");
+
+      lcd.setCursor(0, 1);
+      lcd.print("USE 1-100");
+
+      delay(1200);
+
+      numberInput = "";
+    }
+  }
+}
+
+// ==================================================
+// SELECT MINUTES / HOURS
+// ==================================================
+
+void selectTimeUnit()
+{
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("8=MIN  9=HOUR");
+
+  lcd.setCursor(0, 1);
+  lcd.print("VALUE: ");
+  lcd.print(selectedSeconds);
+
+  char key = keypad.getKey();
+
+  if (key == '8')
+  {
+    selectedSeconds = selectedSeconds * 60;
+
+    state = WAIT_CLOSE;
+  }
+
+  else if (key == '9')
+  {
+    selectedSeconds = selectedSeconds * 3600UL;
+
+    state = WAIT_CLOSE;
+  }
+}
+
+// ==================================================
+// WAIT FOR DOOR CLOSE
+// ==================================================
+
+void waitForClose()
+{
+  static bool displayed = false;
+
+  if (!displayed)
+  {
+    clearLCD();
+
+    lcd.setCursor(0, 0);
+    lcd.print("TIME SELECTED");
+
+    lcd.setCursor(0, 1);
+
+    unsigned long minutes = selectedSeconds / 60;
+    unsigned long hours = minutes / 60;
+
+    if (hours > 0)
+    {
+      lcd.print(hours);
+      lcd.print(" H");
+    }
+    else
+    {
+      lcd.print(minutes);
+      lcd.print(" MIN");
+    }
+
+    delay(1200);
+
+    clearLCD();
+
+    lcd.setCursor(0, 0);
+    lcd.print("PRESS 7 TO");
+
+    lcd.setCursor(0, 1);
+    lcd.print("CLOSE DOOR");
+
+    displayed = true;
+  }
+
+  char key = keypad.getKey();
+
+  if (key == '7')
+  {
+    displayed = false;
+
+    closeDoor();
+
+    delay(500);
+
+    startCharging();
+  }
+}
+
+// ==================================================
+// START CHARGING
+// ==================================================
+
+void startCharging()
+{
+  remainingSeconds = selectedSeconds;
+
+  lastTimerUpdate = millis();
+
+  relayON();
+
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("CHARGING ON");
+
+  delay(1000);
+
+  state = CHARGING;
+}
+
+// ==================================================
+// CHARGING PROCESS
+// ==================================================
+
+void chargingProcess()
+{
+  char key = keypad.getKey();
+
+  // -----------------------------------------------
+  // EMERGENCY ACCESS
+  // -----------------------------------------------
+
+  if (key == '9')
+  {
+    state = EMERGENCY_PASSWORD;
+
+    enteredPassword = "";
+
+    return;
+  }
+
+  // -----------------------------------------------
+  // COUNTDOWN
+  // -----------------------------------------------
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastTimerUpdate >= 1000)
+  {
+    unsigned long elapsed =
+      (currentMillis - lastTimerUpdate) / 1000;
+
+    if (elapsed >= remainingSeconds)
+    {
+      remainingSeconds = 0;
+    }
+    else
+    {
+      remainingSeconds -= elapsed;
+    }
+
+    lastTimerUpdate = currentMillis;
+  }
+
+  displayCountdown();
+
+  // -----------------------------------------------
+  // TIMER FINISHED
+  // -----------------------------------------------
+
+  if (remainingSeconds == 0)
+  {
+    relayOFF();
+
+    clearLCD();
+
+    lcd.setCursor(0, 0);
+    lcd.print("CHARGING DONE");
+
+    lcd.setCursor(0, 1);
+    lcd.print("PRESS 9");
+
+    delay(1500);
+
+    state = PASSWORD_AFTER_CHARGE;
+  }
+}
+
+// ==================================================
+// DISPLAY COUNTDOWN
+// ==================================================
+
+void displayCountdown()
+{
+  unsigned long hours =
+    remainingSeconds / 3600;
+
+  unsigned long minutes =
+    (remainingSeconds % 3600) / 60;
+
+  unsigned long seconds =
+    remainingSeconds % 60;
+
+  lcd.setCursor(0, 0);
+  lcd.print("CHARGING        ");
+
+  lcd.setCursor(0, 1);
+
+  if (hours < 10)
+    lcd.print("0");
+
+  lcd.print(hours);
+  lcd.print(":");
+
+  if (minutes < 10)
+    lcd.print("0");
+
+  lcd.print(minutes);
+  lcd.print(":");
+
+  if (seconds < 10)
+    lcd.print("0");
+
+  lcd.print(seconds);
+}
+
+// ==================================================
+// EMERGENCY PASSWORD DURING CHARGING
+// ==================================================
+
+void emergencyAccess()
+{
+  // Timer is naturally paused because chargingProcess()
+  // is no longer being executed.
+
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("TIMER PAUSED");
+
+  lcd.setCursor(0, 1);
+  lcd.print("ENTER PASSWORD");
+
+  delay(1000);
+
+  enteredPassword = getPassword();
+
+  if (checkPassword(enteredPassword))
+  {
+    relayOFF();
+
+    clearLCD();
+
+    lcd.setCursor(0, 0);
+    lcd.print("PASSWORD");
+
+    lcd.setCursor(0, 1);
+    lcd.print("CORRECT");
+
+    delay(1000);
+
+    openDoor();
+
+    state = REMOVE_PHONE;
+  }
+
+  else
+  {
+    clearLCD();
+
+    lcd.setCursor(0, 0);
+    lcd.print("WRONG PASSWORD");
+
+    lcd.setCursor(0, 1);
+    lcd.print("CHARGING RESUME");
+
+    delay(1200);
+
+    // Resume from exactly the remaining time
+    lastTimerUpdate = millis();
+
+    state = CHARGING;
+  }
+}
+
+// ==================================================
+// PASSWORD AFTER TIMER FINISH
+// ==================================================
+
+void enterPasswordAfterCharge()
+{
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("PRESS 9 TO");
+
+  lcd.setCursor(0, 1);
+  lcd.print("ENTER PASSWORD");
+
+  char key = keypad.getKey();
+
+  if (key == '9')
+  {
+    enteredPassword = "";
+
+    delay(500);
+
+    enteredPassword = getPassword();
+
+    if (checkPassword(enteredPassword))
+    {
+      openDoor();
+
+      state = REMOVE_PHONE;
+    }
+    else
+    {
+      clearLCD();
+
+      lcd.setCursor(0, 0);
+      lcd.print("WRONG PASSWORD");
+
+      lcd.setCursor(0, 1);
+      lcd.print("TRY AGAIN");
+
+      delay(1200);
+    }
+  }
+}
+
+// ==================================================
+// REMOVE PHONE
+// ==================================================
+
+void removePhone()
+{
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("REMOVE PHONE");
+
+  lcd.setCursor(0, 1);
+  lcd.print("PRESS 7 CLOSE");
+
+  char key = keypad.getKey();
+
+  if (key == '7')
+  {
+    closeDoor();
+
+    delay(1000);
+
+    state = RESET_SYSTEM;
+  }
+}
+
+// ==================================================
+// GET 4-DIGIT PASSWORD
+// ==================================================
+
+String getPassword()
+{
+  String password = "";
+
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("PASSWORD:");
+
+  lcd.setCursor(0, 1);
+
+  while (password.length() < 4)
+  {
+    char key = keypad.getKey();
+
+    if (key >= '0' && key <= '9')
+    {
+      password += key;
+
+      lcd.print("*");
+    }
+
+    else if (key == '*')
+    {
+      password = "";
+
+      lcd.setCursor(0, 1);
+      lcd.print("                ");
+      lcd.setCursor(0, 1);
+    }
+  }
+
+  return password;
+}
+
+// ==================================================
+// CHECK PASSWORD
+// ==================================================
+
+bool checkPassword(String pass)
+{
+  return pass == savedPassword;
+}
+
+// ==================================================
+// OPEN DOOR
+// ==================================================
+
+void openDoor()
+{
+  doorServo.write(DOOR_OPEN);
+
+  delay(700);
+}
+
+// ==================================================
+// CLOSE DOOR
+// ==================================================
+
+void closeDoor()
+{
+  doorServo.write(DOOR_CLOSED);
+
+  delay(700);
+}
+
+// ==================================================
+// RELAY ON
+// ==================================================
+
+void relayON()
+{
+  digitalWrite(RELAY_PIN, HIGH);
+}
+
+// ==================================================
+// RELAY OFF
+// ==================================================
+
+void relayOFF()
+{
+  digitalWrite(RELAY_PIN, LOW);
+}
+
+// ==================================================
+// RESET SYSTEM
+// ==================================================
+
+void resetSystem()
+{
+  relayOFF();
+
+  doorServo.write(DOOR_CLOSED);
+
+  savedPassword = "";
+  enteredPassword = "";
+
+  selectedSeconds = 0;
+  remainingSeconds = 0;
+
+  numberInput = "";
+
+  clearLCD();
+
+  lcd.setCursor(0, 0);
+  lcd.print("SYSTEM RESET");
+
+  delay(1500);
+
+  state = START_SCREEN;
+}
+
+// ==================================================
+// CLEAR LCD
+// ==================================================
+
+void clearLCD()
+{
+  lcd.clear();
+}
